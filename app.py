@@ -21,7 +21,7 @@ def main():
 
     # 上传文件到知识库
     print("\n上传文件中...")
-    upload_result = qa_system.upload_file(r"E:\WeChat Files\WXWork\1688856623467349\Cache\File\2025-07\《市政工程勘察规范》CJJ 56-2012.pdf")
+    upload_result = qa_system.upload_file(r"E:\WeChat Files\WXWork\1688856623467349\Cache\File\2025-07\《市政工程勘察规范》测试.pdf")
     print(upload_result["message"])
 
     # # 查询知识库

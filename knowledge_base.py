@@ -24,8 +24,8 @@ class TableProcessor:
         from paddleocr import PaddleOCR
         os.environ['CUDA_VISIBLE_DEVICES'] = ''  # 禁用所有GPU
         # 初始化表格检测模型 (DETR)
-        self.processor = DetrImageProcessor.from_pretrained("../models/detr-doc-table-detection")
-        self.detection_model = DetrForObjectDetection.from_pretrained("../models/detr-doc-table-detection",
+        self.processor = DetrImageProcessor.from_pretrained("models/detr-doc-table-detection")
+        self.detection_model = DetrForObjectDetection.from_pretrained("models/detr-doc-table-detection",
                                                                       low_cpu_mem_usage=False  # 禁用 meta device
                                                                       )
         print(self.detection_model.device)  # 应显示实际设备（如cuda:0）
@@ -59,43 +59,88 @@ class TableProcessor:
         return table_bboxes
 
     def extract_table_content(self, image, bbox):
-        """提取表格内容（带结构识别）"""
-        # 裁剪表格区域
-        x_min, y_min, x_max, y_max = bbox
-        table_img = image[y_min:y_max, x_min:x_max]
+        try:
 
-        # 识别表格结构
-        structure = self.recognize_table_structure(table_img)
+            """提取表格内容（带结构识别）"""
+            # 裁剪表格区域
+            x_min, y_min, x_max, y_max = bbox
+            h, w = image.shape[:2]
+            x_min = max(0, int(x_min))
+            y_min = max(0, int(y_min))
+            x_max = min(w, int(x_max))
+            y_max = min(h, int(y_max))
 
-        # 提取单元格内容
-        table_data = []
+            # 检查bbox是否有效
+            if x_max <= x_min or y_max <= y_min:
+                print(f"无效的bbox: {bbox}")
+                return []
 
-        # 获取行列边界
-        rows = structure["rows"]
-        cols = structure["columns"]
+            table_img = image[y_min:y_max, x_min:x_max]
+            print('table_img', table_img.shape)
 
-        # 遍历每个单元格
-        for i in range(len(rows) - 1):
-            row_data = []
-            for j in range(len(cols) - 1):
-                # 裁剪单元格图像
-                cell_img = table_img[rows[i]:rows[i + 1], cols[j]:cols[j + 1]]
+            # 识别表格结构
+            structure = self.recognize_table_structure(table_img)
+            print('structure', structure)
 
-                # 对单元格进行OCR
-                result = self.ocr.ocr(cell_img, cls=True)
+            # 提取单元格内容
+            table_data = []
 
-                # 提取文本内容
-                cell_text = ""
-                for line in result:
-                    if line and line[0]:
-                        for word_info in line:
-                            cell_text += word_info[1][0] + " "
+            # 获取行列边界
+            rows = structure["rows"]
+            cols = structure["columns"]
 
-                row_data.append(cell_text.strip())
+            # 确保行列边界在表格图像范围内
+            rows = [r for r in rows if r < table_img.shape[0]]
+            cols = [c for c in cols if c < table_img.shape[1]]
 
-            table_data.append(row_data)
+            # 遍历每个单元格
+            for i in range(len(rows) - 1):
+                row_data = []
+                for j in range(len(cols) - 1):
+                    # 裁剪单元格图像
+                    cell_y1 = rows[i]
+                    cell_y2 = rows[i + 1]
+                    cell_x1 = cols[j]
+                    cell_x2 = cols[j + 1]
 
-        return table_data
+                    # 确保单元格坐标有效
+                    if cell_y1 >= cell_y2 or cell_x1 >= cell_x2:
+                        row_data.append("")
+                        continue
+
+                    cell_img = table_img[cell_y1:cell_y2, cell_x1:cell_x2]
+
+                    # print('cell_img', cell_img)
+                    # print(f'cell_img shape: {cell_img.shape}')  # 打印单元格图像形状
+
+                    # 如果单元格图像为空，则添加空字符串并跳过OCR
+                    if cell_img.size == 0:
+                        row_data.append("")
+                        continue
+
+                    # 对单元格进行OCR
+                    result = self.ocr.ocr(cell_img, cls=True)
+                    print('result', result)
+
+                    # 提取文本内容
+                    cell_text = ""
+                    for line in result:
+                        if line and line[0]:
+                            for word_info in line:
+                                cell_text += word_info[1][0] + " "
+                    print('cell_text', cell_text)
+
+                    row_data.append(cell_text.strip())
+
+                table_data.append(row_data)
+            print('table_data', table_data)
+
+            return table_data
+
+        except Exception as e:
+            import traceback
+            print(f"表格提取失败: {str(e)}")
+            print(traceback.format_exc())  # 打印堆栈跟踪
 
     def recognize_table_structure(self, table_image):
         """识别表格结构（使用深度学习方法）"""
@@ -200,7 +245,7 @@ class KnowledgeBase:
         '''
         self.embedding_model = HuggingFaceEmbeddings(
             # model_name="BAAI/bge-small-zh-v1.5",
-            model_name="../models/bge-small-zh-v1.5",  # 替换为本地路径
+            model_name="models/bge-small-zh-v1.5",  # 替换为本地路径
             model_kwargs={'device': 'cpu'}
         )
 
@@ -251,7 +296,7 @@ class KnowledgeBase:
                     text_content += page.extract_text()
 
                 # 如果提取的文本很少或为空，很可能是图片型PDF
-                if len(text_content.strip()) < 50:  # 阈值可根据实际情况调整
+                if len(text_content.strip()) < 75:  # 阈值可根据实际情况调整
                     return True
 
             return False
@@ -376,60 +421,61 @@ class KnowledgeBase:
 
             # OCR提取文本
             ocr_text = self._ocr_pdf(file_path)
+            print('ocr_text', ocr_text)
             if not ocr_text:
                 return {"status": "error", "message": "OCR提取文本失败"}
 
-            # # 创建文档对象
-            # from langchain_core.documents import Document
-            # document = [Document(page_content=ocr_text)]
-            #
-            # # 分割文本
-            # text_splitter = RecursiveCharacterTextSplitter(
-            #     chunk_size=500,
-            #     chunk_overlap=50,
-            #     length_function=len,
-            #     is_separator_regex=False,
-            # )
-            # chunks = text_splitter.split_documents(document)
-            #
-            # # 保存文本块
-            # chunk_files = []
-            # for i, chunk in enumerate(chunks):
-            #     chunk_text = chunk.page_content
-            #     chunk_filename = f"{file_hash}_chunk{i}.txt"
-            #     chunk_path = os.path.join(self.chunks_dir, chunk_filename)
-            #
-            #     with open(chunk_path, "w", encoding="utf-8") as f:
-            #         f.write(chunk_text)
-            #
-            #     chunk_files.append(chunk_path)
-            #
-            # # 生成嵌入向量
-            # texts = [chunk.page_content for chunk in chunks]
-            # embeddings = self.embedding_model.embed_documents(texts)
-            # embeddings_np = np.array(embeddings).astype("float32")
-            #
-            # # 保存嵌入向量
-            # embedding_path = os.path.join(self.embeddings_dir, f"{file_hash}.npy")
-            # np.save(embedding_path, embeddings_np)
-            #
-            # # 更新索引
-            # if self.index.ntotal == 0:
-            #     self.index = faiss.IndexFlatL2(embeddings_np.shape[1])
-            # self.index.add(embeddings_np)
-            # faiss.write_index(self.index, os.path.join(self.base_dir, "faiss_index"))
-            #
-            # # 更新元数据
-            # self.metadata[file_hash] = {
-            #     "filename": filename,
-            #     "file_path": dest_path,
-            #     "chunk_files": chunk_files,
-            #     "embedding_path": embedding_path,
-            #     "chunk_count": len(chunks),
-            #     "upload_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            #     "is_ocr": True  # 标记为OCR处理
-            # }
-            # self._save_metadata()
+            # 创建文档对象
+            from langchain_core.documents import Document
+            document = [Document(page_content=ocr_text)]
+
+            # 分割文本
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=500,
+                chunk_overlap=50,
+                length_function=len,
+                is_separator_regex=False,
+            )
+            chunks = text_splitter.split_documents(document)
+
+            # 保存文本块
+            chunk_files = []
+            for i, chunk in enumerate(chunks):
+                chunk_text = chunk.page_content
+                chunk_filename = f"{file_hash}_chunk{i}.txt"
+                chunk_path = os.path.join(self.chunks_dir, chunk_filename)
+
+                with open(chunk_path, "w", encoding="utf-8") as f:
+                    f.write(chunk_text)
+
+                chunk_files.append(chunk_path)
+
+            # 生成嵌入向量
+            texts = [chunk.page_content for chunk in chunks]
+            embeddings = self.embedding_model.embed_documents(texts)
+            embeddings_np = np.array(embeddings).astype("float32")
+
+            # 保存嵌入向量
+            embedding_path = os.path.join(self.embeddings_dir, f"{file_hash}.npy")
+            np.save(embedding_path, embeddings_np)
+
+            # 更新索引
+            if self.index.ntotal == 0:
+                self.index = faiss.IndexFlatL2(embeddings_np.shape[1])
+            self.index.add(embeddings_np)
+            faiss.write_index(self.index, os.path.join(self.base_dir, "faiss_index"))
+
+            # 更新元数据
+            self.metadata[file_hash] = {
+                "filename": filename,
+                "file_path": dest_path,
+                "chunk_files": chunk_files,
+                "embedding_path": embedding_path,
+                "chunk_count": len(chunks),
+                "upload_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "is_ocr": True  # 标记为OCR处理
+            }
+            self._save_metadata()
 
             return {"status": "success", "message": f"图片型PDF已通过OCR添加到知识库: {filename}"}
         except Exception as e:
@@ -456,9 +502,11 @@ class KnowledgeBase:
 
                 # 1. 提取页面所有文本（包含位置信息）
                 text_blocks = self._extract_text_with_position(img_np)
+                # print('text_blocks', text_blocks)
 
                 # 2. 检测表格
                 tables = self.table_processor.detect_tables(img_np)
+                print('tables', tables)
 
                 # 3. 按垂直位置排序所有元素
                 all_elements = []
@@ -471,16 +519,16 @@ class KnowledgeBase:
                         "content": block["text"],
                         "is_table_caption": False
                     })
-                    print(block["text"])
+                    # print(block["text"])
 
                 # 添加表格（检测表名）
                 for table_idx, table_bbox in enumerate(tables):
                     table_id = f"page_{page_num + 1}_table_{table_idx + 1}"
-                    print(table_id)
+                    print('table_id', table_id)
 
                     # 查找表格上方的表名
                     caption = self._find_table_caption(text_blocks, table_bbox)
-                    print(caption)
+                    print('caption', caption)
 
                     # 添加表名
                     if caption:
@@ -498,24 +546,30 @@ class KnowledgeBase:
                         "table_id": table_id,
                         "bbox": table_bbox
                     })
-                    print(table_bbox)
+                    # print('table_bbox', table_bbox)
+                    # print('all_elements', all_elements)
 
                 # 4. 按垂直位置排序
                 all_elements.sort(key=lambda x: x["y"])
 
                 # 5. 构建页面内容
                 page_content = f"第{page_num + 1}页:\n"
+                # print(page_content)
                 for element in all_elements:
                     if element["type"] == "text":
                         # 如果是表名，已经单独处理
                         if not element["is_table_caption"]:
                             page_content += element["content"] + "\n"
-                    else:  # 表格
+                    else:
+                        print('---------------------------------')
+                        # 表格
                         # 提取表格内容
                         table_data = self.table_processor.extract_table_content(
                             img_np, element["bbox"]
                         )
+                        print('table_data', table_data)
                         table_md = self.table_processor.convert_to_markdown(table_data)
+                        print('table_md', table_md)
 
                         # 添加表格
                         page_content += f"\n{table_md}\n"
@@ -529,13 +583,16 @@ class KnowledgeBase:
                 # text = re.sub(r'\n', ' ', text)
                 # text = re.sub(r'\n\s*\n', '\n', text)
                 # full_content += f"第{i + 1}页:\n{text}\n\n"
+            print('full_content', full_content)
 
             return full_content
         except ImportError:
             print("OCR依赖未安装，请运行: pip install pdf2image pytesseract")
             return None
         except Exception as e:
+            import traceback
             print(f"OCR处理失败: {str(e)}")
+            print(traceback.format_exc())  # 打印堆栈跟踪
             return None
 
     def _extract_text_with_position(self, image):
@@ -544,23 +601,27 @@ class KnowledgeBase:
 
         ocr = PaddleOCR(use_angle_cls=True, lang='ch', show_log=False)
         result = ocr.ocr(image)
+        print(result)
 
         text_blocks = []
-        for line in result:
-            if line and line[0]:
-                # 计算文本块的中心y坐标
-                points = line[0]
-                y_coords = [point[1] for point in points]
-                y_center = sum(y_coords) / len(y_coords)
+        for lines in result:
+            for line in lines:
+                if line and line[0]:
+                    # 计算文本块的中心y坐标
+                    # 文本框坐标
+                    points = line[0]
+                    text_info = line[1]  # 文本信息和置信度
+                    y_coords = [point[1] for point in points]
+                    y_center = sum(y_coords) / len(y_coords)
 
-                # 提取文本
-                text = line[1][0] if line[1] else ""
+                    # 提取文本
+                    text = line[1][0] if line[1] else ""
 
-                text_blocks.append({
-                    "text": text,
-                    "y": y_center,
-                    "bbox": points
-                })
+                    text_blocks.append({
+                        "text": text,
+                        "y": y_center,
+                        "bbox": points
+                    })
 
         return text_blocks
 
