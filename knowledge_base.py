@@ -231,12 +231,14 @@ class KnowledgeBase:
         self.documents_dir = os.path.join(base_dir, "documents")
         self.chunks_dir = os.path.join(base_dir, "chunks")
         self.embeddings_dir = os.path.join(base_dir, "embeddings")
+        self.structure_dir = os.path.join(base_dir, "structures")  # 新增结构信息目录
         self.metadata_file = os.path.join(base_dir, "metadata.json")
 
         # 创建目录
         os.makedirs(self.documents_dir, exist_ok=True)
         os.makedirs(self.chunks_dir, exist_ok=True)
         os.makedirs(self.embeddings_dir, exist_ok=True)
+        os.makedirs(self.structure_dir, exist_ok=True)  # 创建结构信息目录
 
         # 初始化嵌入模型
         '''
@@ -353,7 +355,7 @@ class KnowledgeBase:
                 # self.tables_dir = os.path.join(base_dir, "tables")
                 # os.makedirs(self.tables_dir, exist_ok=True)
                 self.table_processor = TableProcessor()  # 表格处理器
-                return self._process_image_pdf(file_path, file_hash, filename, dest_path)
+                return self._process_image_pdf_with_structure(file_path, file_hash, filename, dest_path)
 
         try:
             # 6. 使用加载器加载文档内容
@@ -397,6 +399,7 @@ class KnowledgeBase:
             # 如果是第一个文档，重置索引维度
             self.index = faiss.IndexFlatL2(embeddings_np.shape[1])
         self.index.add(embeddings_np)
+        faiss.write_index(self.index, os.path.join(self.base_dir, "faiss_index"))
 
         # 12. 保存索引
         faiss.write_index(self.index, os.path.join(self.base_dir, "faiss_index"))
@@ -408,26 +411,28 @@ class KnowledgeBase:
             "chunk_files": chunk_files,
             "embedding_path": embedding_path,
             "chunk_count": len(chunks),
-            "upload_time": time.strftime("%Y-%m-%d %H:%M:%S")
+            "upload_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "is_ocr": False,  # 标记为非OCR处理
+            "has_structure": False  # 标记为无结构信息
         }
         self._save_metadata()
 
         return {"status": "success", "message": f"文件已成功添加到知识库: {filename}"}
 
-    def _process_image_pdf(self, file_path, file_hash, filename, dest_path):
+    def _process_image_pdf_with_structure(self, file_path, file_hash, filename, dest_path):
         """处理图片型PDF（使用OCR提取文本）"""
         try:
             print(f"检测到图片型PDF，使用OCR处理: {filename}")
 
             # OCR提取文本
-            ocr_text = self._ocr_pdf(file_path)
-            print('ocr_text', ocr_text)
-            if not ocr_text:
+            ocr_result = self._ocr_pdf_with_structure(file_path)
+            # print('ocr_text', ocr_result)
+            if not ocr_result or "content" not in ocr_result:
                 return {"status": "error", "message": "OCR提取文本失败"}
 
             # 创建文档对象
             from langchain_core.documents import Document
-            document = [Document(page_content=ocr_text)]
+            document = [Document(page_content=ocr_result["content"])]
 
             # 分割文本
             text_splitter = RecursiveCharacterTextSplitter(
@@ -473,15 +478,23 @@ class KnowledgeBase:
                 "embedding_path": embedding_path,
                 "chunk_count": len(chunks),
                 "upload_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "is_ocr": True  # 标记为OCR处理
+                "is_ocr": True,  # 标记为OCR处理
+                "has_structure": "structure" in ocr_result  # 标记是否有结构信息
             }
             self._save_metadata()
 
-            return {"status": "success", "message": f"图片型PDF已通过OCR添加到知识库: {filename}"}
+            # 返回包含结构信息的结果
+            return {
+                "status": "success",
+                "message": f"图片型PDF已通过OCR添加到知识库: {filename}"
+            }
+
+            # if "structure" in ocr_result:
+            #     result["structure"] = ocr_result["structure"]
         except Exception as e:
             return {"status": "error", "message": f"OCR处理失败: {str(e)}"}
 
-    def _ocr_pdf(self, pdf_path):
+    def _ocr_pdf_with_structure(self, pdf_path):
         """使用OCR提取PDF中的文本（支持中英文）"""
         try:
             from pdf2image import convert_from_path
@@ -497,6 +510,12 @@ class KnowledgeBase:
 
             # 识别每页文本
             full_content = ""
+
+            structure_info = {
+                "chapters": [],
+                "tables": [],
+                "pages": []
+            }
             for page_num, image in enumerate(images):
                 img_np = np.array(image)
 
@@ -507,6 +526,16 @@ class KnowledgeBase:
                 # 2. 检测表格
                 tables = self.table_processor.detect_tables(img_np)
                 print('tables', tables)
+
+                # 3. 识别章节标题（通过字体大小、位置等特征）
+                chapter_titles = self._detect_chapter_titles(text_blocks)
+                for title in chapter_titles:
+                    structure_info["chapters"].append({
+                        "title": title["text"],
+                        "page": page_num + 1,
+                        "y_position": title["y"],
+                        "bbox": title["bbox"]
+                    })
 
                 # 3. 按垂直位置排序所有元素
                 all_elements = []
@@ -522,6 +551,7 @@ class KnowledgeBase:
                     # print(block["text"])
 
                 # 添加表格（检测表名）
+                page_tables = []
                 for table_idx, table_bbox in enumerate(tables):
                     table_id = f"page_{page_num + 1}_table_{table_idx + 1}"
                     print('table_id', table_id)
@@ -530,8 +560,25 @@ class KnowledgeBase:
                     caption = self._find_table_caption(text_blocks, table_bbox)
                     print('caption', caption)
 
+                    # 结构添加表格
+                    table_info = {
+                        "id": table_id,
+                        "page": page_num + 1,
+                        "caption": caption["text"],
+                        "bbox": table_bbox
+                    }
+                    structure_info["tables"].append(table_info)
+                    page_tables.append(table_info)
+
                     # 添加表名
                     if caption:
+                        # 结构添加章节标题
+                        structure_info["chapters"].append({
+                            "title": caption["text"],
+                            "page": page_num + 1,
+                            "y_position": caption["y"],
+                            "bbox": caption["bbox"]
+                        })
                         all_elements.append({
                             "type": "text",
                             "y": caption["y"],
@@ -567,7 +614,6 @@ class KnowledgeBase:
                         table_data = self.table_processor.extract_table_content(
                             img_np, element["bbox"]
                         )
-                        print('table_data', table_data)
                         table_md = self.table_processor.convert_to_markdown(table_data)
                         print('table_md', table_md)
 
@@ -575,6 +621,15 @@ class KnowledgeBase:
                         page_content += f"\n{table_md}\n"
 
                 full_content += page_content + "\n\n"
+
+                # 保存页面结构信息
+                page_structure = {
+                    "page_num": page_num + 1,
+                    "text_blocks": text_blocks,
+                    "tables": structure_info["tables"],
+                    "chapter_titles": chapter_titles
+                }
+                structure_info["pages"].append(page_structure)
 
                 # # 使用中文+英文识别
                 # # 去掉多余的空格
@@ -584,8 +639,13 @@ class KnowledgeBase:
                 # text = re.sub(r'\n\s*\n', '\n', text)
                 # full_content += f"第{i + 1}页:\n{text}\n\n"
             print('full_content', full_content)
+            print('structure', structure_info)
 
-            return full_content
+            # return full_content
+            return {
+                "content": full_content,
+                "structure": structure_info
+            }
         except ImportError:
             print("OCR依赖未安装，请运行: pip install pdf2image pytesseract")
             return None
@@ -625,6 +685,35 @@ class KnowledgeBase:
 
         return text_blocks
 
+    """检测章节标题"""
+    def _detect_chapter_titles(self, text_blocks):
+        import re
+        """检测章节标题（支持数字编号格式）"""
+        chapter_titles = []
+
+        # 正则表达式模式匹配数字编号标题
+        # 匹配如 "3.0.1"、"1.2"、"2.3.4.5" 等格式
+        number_pattern = r'^\d+(\.\d+)*\s+'
+
+        for block in text_blocks:
+            text = block["text"].strip()
+
+            # 检测数字编号章节标题
+            if re.search(number_pattern, text):
+                # 确保不是页码或其他数字（通过文本长度和内容判断）
+                if len(text) > 3 and not text.isdigit():  # 排除纯数字（可能是页码）
+                    chapter_titles.append(block)
+                    continue
+
+            # 检测传统章节标题（保留原有逻辑）
+            if (("章" in text and "第" in text) or
+                    (len(text) < 30 and any(c in text for c in ["概述", "引言", "背景", "结论", "摘要"])) or
+                    (len(text) < 20 and text.endswith("章"))):
+                chapter_titles.append(block)
+
+        return chapter_titles
+
+    # 检测表名
     def _find_table_caption(self, text_blocks, table_bbox):
         """在表格上方查找表名"""
         table_top = table_bbox[1]
@@ -648,6 +737,7 @@ class KnowledgeBase:
         return caption_candidates[0][1]
 
     def search(self, query, top_k=5):
+        # TODO:修改搜索方法以支持结构过滤和文件过滤
         """在知识库中搜索相关内容"""
         # 生成查询嵌入
         query_embedding = self.embedding_model.embed_query(query)

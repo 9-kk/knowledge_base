@@ -26,7 +26,7 @@ def main():
 
     # # 查询知识库
     # print("\n知识库查询中...")
-    # question = "如何实现岩⼟勘察项⽬的自动化"
+    # question = "《市政工程勘察规范》CJJ 56-2012.pdf中表3.0.1-1市政工程重要性等级划分的内容是什么"
     # response = qa_system.query(question, use_web=False)
     # print(f"问题: {question}")
     # print(f"回答: {response}")
