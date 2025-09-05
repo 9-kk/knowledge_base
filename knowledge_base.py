@@ -128,9 +128,9 @@ class TableProcessor:
                         if line and line[0]:
                             for word_info in line:
                                 cell_text += word_info[1][0] + " "
-                                print('cell_text', cell_text)
+                                # print('cell_text', cell_text)
 
-                    row_data.append(cell_text.strip())
+                    row_data.append(cell_text.strip().replace(' ', '').replace('\n', ''))
 
                 table_data.append(row_data)
             print('table_data', table_data)
@@ -443,7 +443,7 @@ class KnowledgeBase:
 
             # 分割文本
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=500,
+                chunk_size=1000,
                 chunk_overlap=50,
                 length_function=len,
                 is_separator_regex=False,
@@ -691,7 +691,7 @@ class KnowledgeBase:
 
                     # 确保文本中无空格
                     text_blocks.append({
-                        "text": text.replace(' ', ''),
+                        "text": text.replace(' ', '').replace('\n', ''),
                         "y": y_center,
                         "bbox": points
                     })
