@@ -72,15 +72,15 @@ class TableProcessor:
 
             # 检查bbox是否有效
             if x_max <= x_min or y_max <= y_min:
-                print(f"无效的bbox: {bbox}")
+                # print(f"无效的bbox: {bbox}")
                 return []
 
             table_img = image[y_min:y_max, x_min:x_max]
-            print('table_img', table_img.shape)
+            # print('table_img', table_img.shape)
 
             # 识别表格结构
             structure = self.recognize_table_structure(table_img)
-            print('structure', structure)
+            # print('structure', structure)
 
             # 提取单元格内容
             table_data = []
@@ -120,7 +120,7 @@ class TableProcessor:
 
                     # 对单元格进行OCR
                     result = self.ocr.ocr(cell_img, cls=True)
-                    print('result', result)
+                    # print('result', result)
 
                     # 提取文本内容
                     cell_text = ""
@@ -128,7 +128,7 @@ class TableProcessor:
                         if line and line[0]:
                             for word_info in line:
                                 cell_text += word_info[1][0] + " "
-                    print('cell_text', cell_text)
+                                print('cell_text', cell_text)
 
                     row_data.append(cell_text.strip())
 
@@ -251,11 +251,18 @@ class KnowledgeBase:
             model_kwargs={'device': 'cpu'}
         )
 
+        # 初始化FAISS索引
+        self.index = faiss.IndexFlatL2(384)  # 假设嵌入维度为384
+        self.faiss_index_path = os.path.join(base_dir, "faiss_index")
+
         # 加载元数据
         self.metadata = self._load_metadata()
 
         # 初始化FAISS索引
         self.index = self._init_faiss_index()
+
+        # 初始化表格处理器
+        self.table_processor = TableProcessor()
 
     def _load_metadata(self):
         """加载元数据文件"""
@@ -470,6 +477,12 @@ class KnowledgeBase:
             self.index.add(embeddings_np)
             faiss.write_index(self.index, os.path.join(self.base_dir, "faiss_index"))
 
+            # 保存结构信息（如果有）
+            if "structure" in ocr_result:
+                structure_path = os.path.join(self.structure_dir, f"{file_hash}.json")
+                with open(structure_path, "w", encoding="utf-8") as f:
+                    json.dump(ocr_result["structure"], f, ensure_ascii=False, indent=2)
+
             # 更新元数据
             self.metadata[file_hash] = {
                 "filename": filename,
@@ -560,16 +573,6 @@ class KnowledgeBase:
                     caption = self._find_table_caption(text_blocks, table_bbox)
                     print('caption', caption)
 
-                    # 结构添加表格
-                    table_info = {
-                        "id": table_id,
-                        "page": page_num + 1,
-                        "caption": caption["text"],
-                        "bbox": table_bbox
-                    }
-                    structure_info["tables"].append(table_info)
-                    page_tables.append(table_info)
-
                     # 添加表名
                     if caption:
                         # 结构添加章节标题
@@ -586,13 +589,23 @@ class KnowledgeBase:
                             "is_table_caption": True
                         })
 
-                    # 添加表格
-                    all_elements.append({
-                        "type": "table",
-                        "y": table_bbox[1],  # 表格顶部y坐标
-                        "table_id": table_id,
-                        "bbox": table_bbox
-                    })
+                        # 结构添加表格
+                        table_info = {
+                            "id": table_id,
+                            "page": page_num + 1,
+                            "caption": caption["text"],
+                            "bbox": table_bbox
+                        }
+                        structure_info["tables"].append(table_info)
+                        page_tables.append(table_info)
+
+                        # 添加表格
+                        all_elements.append({
+                            "type": "table",
+                            "y": table_bbox[1],  # 表格顶部y坐标
+                            "table_id": table_id,
+                            "bbox": table_bbox
+                        })
                     # print('table_bbox', table_bbox)
                     # print('all_elements', all_elements)
 
@@ -661,7 +674,6 @@ class KnowledgeBase:
 
         ocr = PaddleOCR(use_angle_cls=True, lang='ch', show_log=False)
         result = ocr.ocr(image)
-        print(result)
 
         text_blocks = []
         for lines in result:
@@ -677,8 +689,9 @@ class KnowledgeBase:
                     # 提取文本
                     text = line[1][0] if line[1] else ""
 
+                    # 确保文本中无空格
                     text_blocks.append({
-                        "text": text,
+                        "text": text.replace(' ', ''),
                         "y": y_center,
                         "bbox": points
                     })
@@ -736,15 +749,18 @@ class KnowledgeBase:
         caption_candidates.sort(key=lambda x: x[0])
         return caption_candidates[0][1]
 
-    def search(self, query, top_k=5):
+    def search(self, query, top_k=5, chapter_filter=None, table_filter=None, page_filter=None,
+               file_filter=None):
         # TODO:修改搜索方法以支持结构过滤和文件过滤
-        """在知识库中搜索相关内容"""
+        """在知识库中搜索相关内容，支持章节、表格、页面和文件过滤"""
         # 生成查询嵌入
         query_embedding = self.embedding_model.embed_query(query)
         query_embedding_np = np.array([query_embedding]).astype("float32")
 
         # 搜索索引
-        distances, indices = self.index.search(query_embedding_np, top_k)
+        # 搜索索引（获取更多结果以便过滤）
+        search_k = top_k * 5  # 获取更多结果用于过滤
+        distances, indices = self.index.search(query_embedding_np, search_k)
 
         # 收集结果
         results = []
@@ -760,23 +776,96 @@ class KnowledgeBase:
                 end_idx = current_idx + meta["chunk_count"]
 
                 if start_idx <= idx < end_idx:
+                    # 应用文件过滤
+                    if file_filter and meta["filename"] not in file_filter:
+                        current_idx = end_idx
+                        continue
+
                     chunk_idx = idx - start_idx
                     chunk_path = meta["chunk_files"][chunk_idx]
 
                     with open(chunk_path, "r", encoding="utf-8") as f:
                         content = f.read()
 
-                    results.append({
+                    result_item = {
                         "source": f"知识库: {meta['filename']}",
                         "content": content,
                         "score": float(1 - distances[0][i]),  # 转换为相似度分数
-                        "chunk_index": chunk_idx
-                    })
+                        "chunk_index": chunk_idx,
+                        "file_hash": file_hash
+                    }
+
+                    # 加载结构信息（如果有）
+                    if meta.get("has_structure", False):
+                        structure_path = os.path.join(self.structure_dir, f"{file_hash}.json")
+                        if os.path.exists(structure_path):
+                            with open(structure_path, "r", encoding="utf-8") as f:
+                                result_item["structure"] = json.load(f)
+
+                    results.append(result_item)
                     break
 
                 current_idx = end_idx
 
+        # 应用结构过滤
+        if chapter_filter or table_filter or page_filter:
+            filtered_results = []
+            for result in results:
+                # 检查是否有结构信息
+                if "structure" not in result:
+                    continue
+
+                # 应用章节过滤
+                if chapter_filter:
+                    chapter_match = False
+                    for chapter in result["structure"].get("chapters", []):
+                        if chapter_filter.lower() in chapter["title"].lower():
+                            chapter_match = True
+                            break
+                    if not chapter_match:
+                        continue
+
+                # 应用表格过滤
+                if table_filter:
+                    table_match = False
+                    for table in result["structure"].get("tables", []):
+                        if (table_filter.lower() in table.get("caption", "").lower() or
+                                table_filter.lower() in table.get("id", "").lower()):
+                            table_match = True
+                            break
+                    if not table_match:
+                        continue
+
+                # # 应用页面过滤
+                # if page_filter:
+                #     # 检查chunk所在的页面
+                #     chunk_page = self._estimate_chunk_page(
+                #         result["chunk_index"],
+                #         result["file_hash"]
+                #     )
+                #     if chunk_page != page_filter:
+                #         continue
+
+                filtered_results.append(result)
+
+            # 按分数排序并取前top_k个结果
+            filtered_results.sort(key=lambda x: x["score"], reverse=True)
+            results = filtered_results[:top_k]
+        else:
+            # 如果没有过滤，取前top_k个结果
+            results = results[:top_k]
+
         return results
+
+    def _estimate_chunk_page(self, chunk_index, file_hash):
+        """估计chunk所在的页面"""
+        # 简化的实现：假设每个页面有固定数量的chunk
+        meta = self.metadata.get(file_hash, {})
+        total_chunks = meta.get("chunk_count", 1)
+
+        # 假设文档有10页，均匀分布
+        estimated_page = int((chunk_index / total_chunks) * 10) + 1
+        return min(estimated_page, 10)  # 确保不超过10页
 
     def list_documents(self):
         """列出知识库中的所有文档"""
