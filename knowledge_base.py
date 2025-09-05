@@ -723,23 +723,98 @@ class KnowledgeBase:
                     # 计算文本块的中心y坐标
                     # 文本框坐标
                     points = line[0]
-                    text_info = line[1]  # 文本信息和置信度
                     y_coords = [point[1] for point in points]
                     y_center = sum(y_coords) / len(y_coords)
 
-                    # 提取文本
+                    # # 提取文本并进行OCR错误校正
                     text = line[1][0] if line[1] else ""
+                    # 错误校正并去掉空格换行符
+                    corrected_text = self._correct_ocr_errors(text)
 
-                    # 确保文本中无空格
                     text_blocks.append({
-                        "text": text.replace(' ', '').replace('\n', ''),
+                        "text": corrected_text,
                         "y": y_center,
                         "bbox": points
                     })
 
         return text_blocks
 
+    def _correct_ocr_errors(self, text):
+        import re
+        """校正OCR识别错误"""
+        if not text:
+            return text
+
+        # 常见OCR错误映射表
+        error_mapping = {
+            # 数字错误
+            '【': '1', '】': '1', 'l': '1', 'I': '1', '丨': '1',
+            '﹒': '2', 'ｚ': '2', 'Z': '2',
+            '§': '3', 'з': '3', 'З': '3',
+            'Ч': '4', 'ч': '4',
+            'Б': '5', 'ь': '5',
+            'б': '6',
+            'Т': '7', 'т': '7',
+            'В': '8', 'в': '8',
+            'д': '9', 'g': '9',
+            'о': '0', 'O': '0', '〇': '0',
+
+            # 标点错误
+            '，': '.', '。': '.', '、': '.', '·': '.', '•': '.',
+            '；': ':', '：': ':',
+            '‘': "'", '’': "'", '「': "'", '」': "'",
+            '『': '"', '』': '"', '〝': '"', '〞': '"',
+
+            # 括号错误
+            '〔': '(', '〕': ')', '［': '[', '］': ']', '｛': '{', '｝': '}',
+
+            # 其他常见错误
+            '一': '-', '一一': '=', '二': '=', 'ニ': '='
+        }
+
+        # 逐步校正
+        corrected_text = text
+
+        # 第一步：直接替换已知错误映射
+        for error, correction in error_mapping.items():
+            corrected_text = corrected_text.replace(error, correction)
+
+        # 第二步：处理数字编号模式错误
+        # 匹配类似"3.0.【"的模式并校正为"3.0.1"
+        number_error_patterns = [
+            (r'(\d+)\.(\d+)\.【', r'\1.\2.1'),  # 3.0.【 → 3.0.1
+            (r'(\d+)\.(\d+)\.】', r'\1.\2.1'),  # 3.0.】 → 3.0.1
+            (r'(\d+)\.(\d+)\.l', r'\1.\2.1'),  # 3.0.l → 3.0.1
+            (r'(\d+)\.(\d+)\.I', r'\1.\2.1'),  # 3.0.I → 3.0.1
+            (r'(\d+)\.(\d+)\.丨', r'\1.\2.1'),  # 3.0.丨 → 3.0.1
+        ]
+
+        for pattern, replacement in number_error_patterns:
+            corrected_text = re.sub(pattern, replacement, corrected_text)
+
+        # # 第三步：处理缺失的点号
+        # # 将"301"校正为"3.0.1"（需要谨慎使用，可能会误校正）
+        # missing_dot_pattern = r'(\d)(\d)(\d)(?=\s|$)'
+        #
+        # def add_dots(match):
+        #     # 只在看起来像编号的情况下添加点号
+        #     numbers = match.groups()
+        #     if len(numbers) == 3 and numbers[0] in '123456789' and numbers[1] in '0123456789' and numbers[
+        #         2] in '0123456789':
+        #         return f"{numbers[0]}.{numbers[1]}.{numbers[2]}"
+        #     return match.group(0)
+        #
+        # corrected_text = re.sub(missing_dot_pattern, add_dots, corrected_text)
+
+        # 第四步：处理空格问题
+        # 将"3 . 0 . 1"校正为"3.0.1"
+        space_pattern = r'(\d)\s*\.\s*(\d)\s*\.\s*(\d)'
+        corrected_text = re.sub(space_pattern, r'\1.\2.\3', corrected_text).replace(' ', '').replace('\n', '')
+
+        return corrected_text
+
     """检测章节标题"""
+
     def _detect_chapter_titles(self, text_blocks):
         import re
         """检测章节标题（支持数字编号格式）"""
