@@ -536,11 +536,16 @@ class KnowledgeBase:
                 text_blocks = self._extract_text_with_position(img_np)
                 # print('text_blocks', text_blocks)
 
-                # 2. 检测表格
+                # 2. 检测是否为目录页
+                is_toc_page = self._is_table_of_contents_page(text_blocks, page_num + 1)
+                if is_toc_page:
+                    continue
+
+                # 3. 检测表格
                 tables = self.table_processor.detect_tables(img_np)
                 print('tables', tables)
 
-                # 3. 识别章节标题（通过字体大小、位置等特征）
+                # 4. 识别章节标题（通过字体大小、位置等特征）
                 chapter_titles = self._detect_chapter_titles(text_blocks)
                 for title in chapter_titles:
                     structure_info["chapters"].append({
@@ -667,6 +672,42 @@ class KnowledgeBase:
             print(f"OCR处理失败: {str(e)}")
             print(traceback.format_exc())  # 打印堆栈跟踪
             return None
+
+    def _is_table_of_contents_page(self, text_blocks, page_num):
+        import re
+        """检测是否为目录页"""
+        # 检查页面是否包含"目录"、"CONTENTS"等关键词
+        toc_keywords = ["目录", "CONTENTS", "目次", "TABLE OF CONTENTS"]
+
+        for block in text_blocks:
+            text = block["text"].strip()
+            if any(keyword in text for keyword in toc_keywords):
+                return True
+
+        # 检查页面是否有典型的目录特征（大量数字和点）
+        dot_pattern_count = 0
+        number_pattern_count = 0
+
+        for block in text_blocks:
+            text = block["text"].strip()
+
+            # 检查是否有大量点（目录中的引导点）
+            if "..." in text or "…" in text or "．" in text:
+                dot_pattern_count += 1
+
+            # 检查是否有页码模式（数字在行尾）
+            if re.search(r'\d+$', text):
+                number_pattern_count += 1
+
+        # 如果点的数量或页码模式数量超过阈值，认为是目录页
+        if dot_pattern_count > 3 or number_pattern_count > 5:
+            return True
+
+        # 第一页很可能是目录页（但不是绝对）
+        if page_num == 1 and (dot_pattern_count > 1 or number_pattern_count > 2):
+            return True
+
+        return False
 
     def _extract_text_with_position(self, image):
         """提取文本及其位置信息"""
