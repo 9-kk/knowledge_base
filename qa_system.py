@@ -129,8 +129,8 @@ class QASystem:
         print('full_context', full_context)
         response = ""
 
-        # # 4. 生成AI响应
-        # response = self.ai_model.generate(question, full_context)
+        # 4. 生成AI响应
+        response = self.ai_model.generate(question, full_context)
 
         # 5. 添加来源信息
         if sources:
@@ -152,31 +152,47 @@ class QASystem:
         return response
 
     def _parse_filters(self, question):
-        """解析问题中的过滤条件"""
+        """解析问题中的过滤条件（支持数字编号格式）"""
         import re
 
         filters = {
             "chapter": None,
             "table": None,
             "page": None,
-            "file": None,  # 新增文件过滤
+            "file": None,
             "filtered_question": question
         }
 
-        # 匹配章节过滤条件
-        chapter_patterns = [
-            r'在第?([一二三四五六七八九十百千万零]+)章',
-            r'在(.+?)章节',
-            r'关于第?([一二三四五六七八九十百千万零]+)章',
-            r'第?([一二三四五六七八九十百千万零]+)章中?'
+        # 匹配数字编号章节过滤条件（如"3.0.1"、"1.2.3"）
+        number_chapter_patterns = [
+            r'第?(\d+(\.\d+)*)[章节条]',
+            r'第?(\d+(\.\d+)*)',
+            r'章节?(\d+(\.\d+)*)',
+            r'条(\d+(\.\d+)*)'
         ]
 
-        for pattern in chapter_patterns:
+        for pattern in number_chapter_patterns:
             match = re.search(pattern, question, re.IGNORECASE)
             if match:
-                filters["chapter"] = match.group(1) or match.group(2)
+                filters["chapter"] = match.group(1)
                 filters["filtered_question"] = re.sub(pattern, '', filters["filtered_question"]).strip()
                 break
+
+        # 如果没有匹配到数字编号，再尝试匹配传统章节格式
+        if not filters["chapter"]:
+            chapter_patterns = [
+                r'在第?([一二三四五六七八九十百千万零]+)章',
+                r'在(.+?)章节',
+                r'关于第?([一二三四五六七八九十百千万零]+)章',
+                r'第?([一二三四五六七八九十百千万零]+)章中?'
+            ]
+
+            for pattern in chapter_patterns:
+                match = re.search(pattern, question, re.IGNORECASE)
+                if match:
+                    filters["chapter"] = match.group(1) or match.group(2)
+                    filters["filtered_question"] = re.sub(pattern, '', filters["filtered_question"]).strip()
+                    break
 
         # 匹配表格过滤条件
         table_patterns = [
