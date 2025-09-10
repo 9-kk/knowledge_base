@@ -14,6 +14,7 @@ from langchain_community.document_loaders import (
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
+# from paddlex import create_pipeline
 # from sentence_transformers import SentenceTransformer
 import torch
 
@@ -28,6 +29,8 @@ class TableProcessor:
         self.detection_model = DetrForObjectDetection.from_pretrained("models/detr-doc-table-detection",
                                                                       low_cpu_mem_usage=False  # 禁用 meta device
                                                                       )
+        # 初始化 PP-TableMagic 表格识别管道
+        # self.table_pipeline = create_pipeline(pipeline="table_recognition_v2")
         print(self.detection_model.device)  # 应显示实际设备（如cuda:0）
         print(self.detection_model.config)  # 应显示模型配置
 
@@ -46,7 +49,7 @@ class TableProcessor:
         # 后处理
         target_sizes = torch.tensor([image.shape[:2]])
         results = self.processor.post_process_object_detection(
-            outputs, target_sizes=target_sizes, threshold=0.8
+            outputs, target_sizes=target_sizes, threshold=0.5
         )[0]
 
         # 提取表格边界框
@@ -79,6 +82,7 @@ class TableProcessor:
             # print('table_img', table_img.shape)
 
             # 识别表格结构
+            print('table_img', type(table_img), table_img.shape, table_img.shape[2])
             structure = self.recognize_table_structure(table_img)
             # print('structure', structure)
 
@@ -114,21 +118,22 @@ class TableProcessor:
                     # print(f'cell_img shape: {cell_img.shape}')  # 打印单元格图像形状
 
                     # 如果单元格图像为空，则添加空字符串并跳过OCR
-                    if cell_img.size == 0:
+                    # 检查单元格图像是否过小，跳过过小的单元格
+                    if cell_img.size == 0 or cell_img.shape[0] < 5 or cell_img.shape[1] < 5:
                         row_data.append("")
                         continue
 
                     # 对单元格进行OCR
-                    result = self.ocr.ocr(cell_img, cls=True)
-                    # print('result', result)
+                    print('shape', cell_img.shape)
+                    results = self.ocr.ocr(cell_img)
+                    result = results[0]
+                    print('result', result)
 
                     # 提取文本内容
                     cell_text = ""
-                    for line in result:
-                        if line and line[0]:
-                            for word_info in line:
-                                cell_text += word_info[1][0] + " "
-                                # print('cell_text', cell_text)
+                    if result and 'rec_texts' in result:
+                        for text in result['rec_texts']:
+                            cell_text += text + " "
 
                     row_data.append(cell_text.strip().replace(' ', '').replace('\n', ''))
 
@@ -145,18 +150,47 @@ class TableProcessor:
     def recognize_table_structure(self, table_image):
         """识别表格结构（使用深度学习方法）"""
         # 使用更先进的表格结构识别方法
-        try:
+        # try:
             # 方法1：使用深度学习模型（如果有）
-            return self._recognize_with_deep_learning(table_image)
-        except:
+        # self._recognize_with_deep_learning(table_image)
+        # except:
             # 方法2：回退到传统方法
-            return self._recognize_with_traditional(table_image)
+        return self._recognize_with_traditional(table_image)
 
     def _recognize_with_deep_learning(self, table_image):
         """使用深度学习识别表格结构"""
-        # 这里可以替换为实际模型，如TableNet
-        # 暂时使用传统方法
-        return self._recognize_with_traditional(table_image)
+        """处理页面图像"""
+        # 使用 PP-TableMagic 进行端到端的表格识别
+        # input 可以是图像路径或 numpy 数组（HWC, BGR格式）
+        results = self.table_pipeline.predict(
+            input=table_image)  # 默认会自动进行方向校正和扭曲矫正，如需关闭可传参 use_doc_orientation_classify=False, use_doc_unwarping=False
+
+        # page_content = f"第{page_num + 1}页:\n"
+        page_content = ''
+
+        # 假设我们主要处理第一个识别结果（对于单页单表的情况）
+        if results:
+            # 获取第一个结果对象
+            table_result = results[0]
+
+            # 1. 可以直接输出或保存结构化结果
+            # 打印识别结果的基本信息
+            print('---------------------------')
+            table_result.print()
+            # 将表格保存为 HTML、Excel、JSON 等多种格式
+            # table_result.save_to_html("./output/")
+            # table_result.save_to_xlsx("./output/")
+            # table_result.save_to_json("./output/")
+            #
+            # # 2. 获取标记down字符串（例如HTML格式）并添加到页面内容中
+            # # 如果你需要将表格的Markdown或HTML字符串整合到你的文本输出中
+            # html_str = table_result.get_html()  # 获取HTML字符串
+        #     # 或者，如果你需要Markdown格式，可能需要从HTML转换，或查看API是否直接支持
+        #     # 假设你有一个将HTML表格转换为Markdown的函数
+        #     table_md = self.html_table_to_markdown(html_str)
+        #     page_content += f"\n{table_md}\n"
+        #
+        # return page_content
 
     def _recognize_with_traditional(self, table_image):
         """使用传统方法识别表格结构"""
@@ -480,8 +514,10 @@ class KnowledgeBase:
             # 保存结构信息（如果有）
             if "structure" in ocr_result:
                 structure_path = os.path.join(self.structure_dir, f"{file_hash}.json")
+                # JSON 序列化不支持ndarray 类型的数据,递归转换所有 ndarray 为列表
+                structure = self.convert_ndarray_to_list(ocr_result["structure"])
                 with open(structure_path, "w", encoding="utf-8") as f:
-                    json.dump(ocr_result["structure"], f, ensure_ascii=False, indent=2)
+                    json.dump(structure, f, ensure_ascii=False, indent=2)
 
             # 更新元数据
             self.metadata[file_hash] = {
@@ -505,7 +541,19 @@ class KnowledgeBase:
             # if "structure" in ocr_result:
             #     result["structure"] = ocr_result["structure"]
         except Exception as e:
-            return {"status": "error", "message": f"OCR处理失败: {str(e)}"}
+            import traceback
+            print(f"2OCR处理失败: {str(e)}")
+            print(traceback.format_exc())  # 打印堆栈跟踪
+            return {"status": "error", "message": f"2OCR处理失败: {str(e)}"}
+
+    def convert_ndarray_to_list(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {key: self.convert_ndarray_to_list(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self.convert_ndarray_to_list(item) for item in obj]
+        return obj
 
     def _ocr_pdf_with_structure(self, pdf_path):
         """使用OCR提取PDF中的文本（支持中英文）"""
@@ -669,7 +717,7 @@ class KnowledgeBase:
             return None
         except Exception as e:
             import traceback
-            print(f"OCR处理失败: {str(e)}")
+            print(f"1OCR处理失败: {str(e)}")
             print(traceback.format_exc())  # 打印堆栈跟踪
             return None
 
@@ -713,29 +761,28 @@ class KnowledgeBase:
         """提取文本及其位置信息"""
         from paddleocr import PaddleOCR
 
-        ocr = PaddleOCR(use_angle_cls=True, lang='ch', show_log=False)
-        result = ocr.ocr(image)
+        ocr = PaddleOCR(use_angle_cls=True, lang='ch')
+        results = ocr.ocr(image)
+        result = results[0]
 
         text_blocks = []
-        for lines in result:
-            for line in lines:
-                if line and line[0]:
-                    # 计算文本块的中心y坐标
-                    # 文本框坐标
-                    points = line[0]
-                    y_coords = [point[1] for point in points]
-                    y_center = sum(y_coords) / len(y_coords)
+        print(result)
+        print(type(result))
+        for line in result['rec_texts']:
+            # 提取文本并进行 OCR 错误校正
+            corrected_text = self._correct_ocr_errors(line)
+            print('corrected_text', corrected_text)
+            # 计算文本块的中心y坐标
+            # 获取文本框坐标
+            points = result['rec_polys'][result['rec_texts'].index(line)]
+            y_coords = [point[1] for point in points]
+            y_center = sum(y_coords) / len(y_coords)
 
-                    # # 提取文本并进行OCR错误校正
-                    text = line[1][0] if line[1] else ""
-                    # 错误校正并去掉空格换行符
-                    corrected_text = self._correct_ocr_errors(text)
-
-                    text_blocks.append({
-                        "text": corrected_text,
-                        "y": y_center,
-                        "bbox": points
-                    })
+            text_blocks.append({
+                "text": corrected_text,
+                "y": y_center,
+                "bbox": points
+            })
 
         return text_blocks
 
