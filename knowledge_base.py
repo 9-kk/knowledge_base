@@ -838,6 +838,7 @@ class KnowledgeBase:
                 # 2. 检测是否为目录页
                 is_toc_page = self._is_table_of_contents_page(text_blocks, page_num + 1)
                 if is_toc_page:
+                    print(page_num + 1)
                     continue
 
                 # 3. 检测表格
@@ -998,7 +999,7 @@ class KnowledgeBase:
                 number_pattern_count += 1
 
         # 如果点的数量或页码模式数量超过阈值，认为是目录页
-        if dot_pattern_count > 3 or number_pattern_count > 5:
+        if dot_pattern_count > 3 or number_pattern_count > 15:
             return True
 
         # 第一页很可能是目录页（但不是绝对）
@@ -1054,17 +1055,11 @@ class KnowledgeBase:
             'д': '9', 'g': '9',
             'о': '0', 'O': '0', '〇': '0',
 
-            # 标点错误
-            '，': '.', '。': '.', '、': '.', '·': '.', '•': '.',
-            '；': ':', '：': ':',
-            '‘': "'", '’': "'", '「': "'", '」': "'",
-            '『': '"', '』': '"', '〝': '"', '〞': '"',
-
             # 括号错误
             '〔': '(', '〕': ')', '［': '[', '］': ']', '｛': '{', '｝': '}',
 
             # 其他常见错误
-            '一': '-', '一一': '=', '二': '=', 'ニ': '='
+            '-': '一', '一一': '=', '=': '二', 'ニ': '二'
         }
 
         # 逐步校正
