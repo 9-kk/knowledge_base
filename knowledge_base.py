@@ -14,7 +14,7 @@ from langchain_community.document_loaders import (
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
-# from paddlex import create_pipeline
+from paddlex import create_pipeline
 # from sentence_transformers import SentenceTransformer
 import torch
 
@@ -30,9 +30,9 @@ class TableProcessor:
                                                                       low_cpu_mem_usage=False  # 禁用 meta device
                                                                       )
         # 初始化 PP-TableMagic 表格识别管道
-        # self.table_pipeline = create_pipeline(pipeline="table_recognition_v2")
-        print(self.detection_model.device)  # 应显示实际设备（如cuda:0）
-        print(self.detection_model.config)  # 应显示模型配置
+        self.table_pipeline = create_pipeline(pipeline="table_recognition_v2")
+        # print(self.detection_model.device)  # 应显示实际设备（如cuda:0）
+        # print(self.detection_model.config)  # 应显示模型配置
 
         # 初始化OCR引擎 (PaddleOCR)
         self.ocr = PaddleOCR(use_angle_cls=True, lang='ch')
@@ -83,9 +83,266 @@ class TableProcessor:
 
             # 识别表格结构
             print('table_img', type(table_img), table_img.shape, table_img.shape[2])
-            structure = self.recognize_table_structure(table_img)
-            # print('structure', structure)
+            # 识别并返回表格的markdown结构
+            return self.recognize_table_md(table_img)
 
+        except Exception as e:
+            import traceback
+            print(f"表格提取失败: {str(e)}")
+            print(traceback.format_exc())  # 打印堆栈跟踪
+
+    def recognize_table_md(self, table_image):
+        """识别表格结构（使用深度学习方法）"""
+        # 使用更先进的表格结构识别方法
+        try:
+            # 方法1：使用深度学习模型（如果有）
+            return self._recognize_with_deep_learning(table_image)
+        except Exception as e:
+            print(f"深度学习模型提取表格失败: {str(e)}")
+            # 方法2：回退到传统方法
+            return self._recognize_with_traditional(table_image)
+
+    def _recognize_with_deep_learning(self, table_image):
+        """使用深度学习识别表格结构"""
+        """处理页面图像"""
+        # 使用 PP-TableMagic 进行端到端的表格识别
+        # input 可以是图像路径或 numpy 数组（HWC, BGR格式）
+        results = self.table_pipeline.predict(
+            input=table_image,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+        )  # 默认会自动进行方向校正和扭曲矫正，如需关闭可传参 use_doc_orientation_classify=False, use_doc_unwarping=False
+
+        # page_content = f"第{page_num + 1}页:\n"
+        page_content = ''
+
+        # 假设我们主要处理第一个识别结果（对于单页单表的情况）
+        if results:
+            import html2text
+            results = list(results)
+
+            # 获取结果对象
+            print('---------------------------')
+            print(results)
+            # print('table_results', results)
+
+            table_data = results[0]
+
+            # 如果存在html数据，通过html提取表格数据
+            if table_data['table_res_list']:
+                # 提取 HTML 表格
+                html_table = table_data['table_res_list'][0]['pred_html'].replace(' ', '')
+                print('html', html_table)
+
+                # 创建HTML到Markdown转换器
+                h = html2text.HTML2Text()
+                h.ignore_links = True
+                h.ignore_images = True
+                h.body_width = 0  # 不换行
+
+                # 转换HTML表格为Markdown
+                markdown_table = h.handle(html_table)
+
+            # 如果没有，用rec_texts文本拼接
+            else:
+                # 通过rec_texts提取表格数据
+                texts = table_data['overall_ocr_res']['rec_texts']
+                boxes = table_data['overall_ocr_res']['rec_boxes']
+                print('rec_texts', texts)
+
+                # 计算每个文本的中心坐标和高度
+                centers = []
+                for i, (text, box) in enumerate(zip(texts, boxes)):
+                    x_center = (box[0] + box[2]) / 2
+                    y_center = (box[1] + box[3]) / 2
+                    height = box[3] - box[1]
+                    width = box[2] - box[0]
+                    centers.append((x_center, y_center, height, width, text, box, i))  # 添加索引以便跟踪
+
+                # 递归函数，用于查找和合并属于同一单元格的所有文本
+                def find_and_merge_cell_texts(start_idx, processed_indices, centers):
+                    """
+                    递归查找和合并属于同一单元格的所有文本
+                    """
+                    if start_idx in processed_indices:
+                        return [], [], processed_indices
+
+                    x_center_i, y_center_i, height_i, width_i, text_i, box_i, idx_i = centers[start_idx]
+                    merged_texts = [text_i]
+                    merged_boxes = [box_i]
+                    processed_indices.add(start_idx)
+
+                    # 查找可能与当前文本属于同一单元格的其他文本
+                    for j, (x_center_j, y_center_j, height_j, width_j, text_j, box_j, idx_j) in enumerate(centers):
+                        if j == start_idx or j in processed_indices:
+                            continue
+
+                        # 检查是否可能属于同一单元格的条件：
+                        # 1. X坐标相近（在同一个列中）
+                        x_diff = abs(x_center_i - x_center_j)
+                        # 检查X方向是否有重叠:右边界完全在左边或左边界完全在右边
+                        x_overlap = not (box_i[2] < box_j[0] or box_j[2] < box_i[0])
+
+                        # 2. Y坐标相差不大（在同一行或相邻行）
+                        y_diff = abs(y_center_i - y_center_j)
+
+                        # 如果满足条件，可能是同一单元格的多行文本
+                        if x_overlap and y_diff < (height_i + height_j):
+                            # 递归查找和合并
+                            sub_texts, sub_boxes, processed_indices = find_and_merge_cell_texts(j, processed_indices,
+                                                                                                centers)
+                            merged_texts.extend(sub_texts)
+                            merged_boxes.extend(sub_boxes)
+
+                    return merged_texts, merged_boxes, processed_indices
+
+                # 主合并过程
+                merged_items = []
+                processed_indices = set()
+
+                for i in range(len(centers)):
+                    if i in processed_indices:
+                        continue
+
+                    # 查找和合并属于同一单元格的所有文本
+                    cell_texts, cell_boxes, processed_indices = find_and_merge_cell_texts(i, processed_indices, centers)
+
+                    # 合并文本和边界框
+                    if cell_texts:
+                        # 按Y坐标排序文本，确保正确的阅读顺序
+                        text_box_pairs = list(zip(cell_texts, cell_boxes))
+                        text_box_pairs.sort(key=lambda x: (x[1][1], x[1][0]))  # 先按Y坐标排序，再按X坐标排序
+
+                        sorted_texts = [pair[0] for pair in text_box_pairs]
+                        sorted_boxes = [pair[1] for pair in text_box_pairs]
+
+                        merged_text = "".join(sorted_texts)
+                        merged_box = [
+                            min(box[0] for box in sorted_boxes),
+                            min(box[1] for box in sorted_boxes),
+                            max(box[2] for box in sorted_boxes),
+                            max(box[3] for box in sorted_boxes)
+                        ]
+
+                        merged_items.append((merged_text, merged_box))
+
+                # 更新文本和边界框
+                new_texts = [item[0] for item in merged_items]
+                new_boxes = [item[1] for item in merged_items]
+
+                print('合并后的文本:', new_texts)
+
+                # 重新计算中心坐标和高度
+                centers = []
+                for box in new_boxes:
+                    x_center = (box[0] + box[2]) / 2
+                    y_center = (box[1] + box[3]) / 2
+                    height = box[3] - box[1]
+                    centers.append((x_center, y_center, height))
+
+                # 按Y坐标分组行
+                new_rows = {}
+                for i, (text, (x_center, y_center, height)) in enumerate(zip(new_texts, centers)):
+                    # 查找是否已经存在相似Y坐标的行
+                    matched_key = None
+                    for key in new_rows.keys():
+                        # 如果Y坐标差值不超过行高的1/2，认为是同一行
+                        if abs(y_center - key) <= height / 2:
+                            matched_key = key
+                            break
+
+                    if matched_key is not None:
+                        # 添加到现有行
+                        new_rows[matched_key].append((x_center, text))
+                    else:
+                        # 创建新行
+                        new_rows[y_center] = [(x_center, text)]
+
+                # 按Y坐标排序行
+                sorted_rows = sorted(new_rows.items(), key=lambda x: x[0])
+
+                # 对每行内的文本按X坐标排序
+                for i, (y_center, cells) in enumerate(sorted_rows):
+                    sorted_cells = sorted(cells, key=lambda x: x[0])
+                    sorted_rows[i] = (y_center, sorted_cells)
+
+                print('最终的行结构:', sorted_rows)
+
+                # 现在可以继续处理表格结构...
+
+                # 原代码
+                rows = {}
+                for i, (text, box) in enumerate(zip(texts, boxes)):
+                    # 使用y坐标的中心点作为行标识
+                    y_center = (box[1] + box[3]) / 2
+                    # 将y坐标四舍五入到最近的10像素，以便将相近的行分组
+                    row_key = round(y_center / 10) * 10
+                    # 文本高度
+                    h = box[3] - box[1]
+                    print('box', text, box, box[1])
+                    print('y', y_center, row_key, h)
+
+                    if row_key not in rows:
+                        rows[row_key] = []
+
+                    rows[row_key].append((box[0], text))  # 存储x坐标和文本
+                print('rows', rows)
+
+                '''
+                先合并再排序：
+                1、先判断有没有识别成两行的位置但其实在同一个单元格的——满足x1差距不大或后者x_center在前者x1x2之间，
+                且y_center之间的距离减去行高的值小于行高
+                2、合并后计算两者的平均y_center写入rows中
+                3、按照y坐标排序行（不能按照四舍五入到10像素来排序，按照y的差值不超过行高的1/2）
+                '''
+                # 按y坐标排序行
+                sorted_rows = sorted(rows.items(), key=lambda x: x[0])
+                print('sorted_rows', sorted_rows)
+
+                # 创建表格
+                markdown_table = []
+
+                # 添加表头（假设前两个文本是表头）
+                if len(sorted_rows) > 0 and len(sorted_rows[0][1]) >= 2:
+                    # 按x坐标排序第一行的文本
+                    sorted_first_row = sorted(sorted_rows[0][1], key=lambda x: x[0])
+                    header = [text for _, text in sorted_first_row]
+                    markdown_table.append("| " + " | ".join(header) + " |")
+                    markdown_table.append("|" + "|".join(["---"] * len(header)) + "|")
+
+                    # 处理剩余行
+                    for y, row_texts in sorted_rows[1:]:
+                        # 按x坐标排序文本
+                        sorted_row = sorted(row_texts, key=lambda x: x[0])
+                        row_cells = [text for _, text in sorted_row]
+
+                        # 确保行中的单元格数量与表头一致
+                        if len(row_cells) < len(header):
+                            # 如果单元格数量不足，用空字符串填充
+                            row_cells.extend([""] * (len(header) - len(row_cells)))
+                        elif len(row_cells) > len(header):
+                            # 如果单元格数量过多，合并多余的单元格
+                            merged_text = " ".join(row_cells[len(header) - 1:])
+                            row_cells = row_cells[:len(header) - 1] + [merged_text]
+
+                        markdown_table.append("| " + " | ".join(row_cells) + " |")
+                markdown_table = "\n".join(markdown_table)
+
+            print('markdown_table', markdown_table)
+            print(type(markdown_table))
+
+            return markdown_table
+
+        else:
+            raise
+
+
+    def _recognize_with_traditional(self, table_img):
+
+        # 用传统方式提取表格结构
+        structure = self._traditional_get_table_content(table_img)
+
+        try:
             # 提取单元格内容
             table_data = []
 
@@ -124,10 +381,9 @@ class TableProcessor:
                         continue
 
                     # 对单元格进行OCR
-                    print('shape', cell_img.shape)
                     results = self.ocr.ocr(cell_img)
                     result = results[0]
-                    print('result', result)
+                    # print('result', result)
 
                     # 提取文本内容
                     cell_text = ""
@@ -138,61 +394,20 @@ class TableProcessor:
                     row_data.append(cell_text.strip().replace(' ', '').replace('\n', ''))
 
                 table_data.append(row_data)
-            print('table_data', table_data)
+            # print('table_data', table_data)
 
-            return table_data
+            # 转为markdown
+            table_md = self.convert_to_markdown(table_data)
+
+            return table_md
 
         except Exception as e:
             import traceback
             print(f"表格提取失败: {str(e)}")
             print(traceback.format_exc())  # 打印堆栈跟踪
 
-    def recognize_table_structure(self, table_image):
-        """识别表格结构（使用深度学习方法）"""
-        # 使用更先进的表格结构识别方法
-        # try:
-            # 方法1：使用深度学习模型（如果有）
-        # self._recognize_with_deep_learning(table_image)
-        # except:
-            # 方法2：回退到传统方法
-        return self._recognize_with_traditional(table_image)
+    def _traditional_get_table_content(self, table_image):
 
-    def _recognize_with_deep_learning(self, table_image):
-        """使用深度学习识别表格结构"""
-        """处理页面图像"""
-        # 使用 PP-TableMagic 进行端到端的表格识别
-        # input 可以是图像路径或 numpy 数组（HWC, BGR格式）
-        results = self.table_pipeline.predict(
-            input=table_image)  # 默认会自动进行方向校正和扭曲矫正，如需关闭可传参 use_doc_orientation_classify=False, use_doc_unwarping=False
-
-        # page_content = f"第{page_num + 1}页:\n"
-        page_content = ''
-
-        # 假设我们主要处理第一个识别结果（对于单页单表的情况）
-        if results:
-            # 获取第一个结果对象
-            table_result = results[0]
-
-            # 1. 可以直接输出或保存结构化结果
-            # 打印识别结果的基本信息
-            print('---------------------------')
-            table_result.print()
-            # 将表格保存为 HTML、Excel、JSON 等多种格式
-            # table_result.save_to_html("./output/")
-            # table_result.save_to_xlsx("./output/")
-            # table_result.save_to_json("./output/")
-            #
-            # # 2. 获取标记down字符串（例如HTML格式）并添加到页面内容中
-            # # 如果你需要将表格的Markdown或HTML字符串整合到你的文本输出中
-            # html_str = table_result.get_html()  # 获取HTML字符串
-        #     # 或者，如果你需要Markdown格式，可能需要从HTML转换，或查看API是否直接支持
-        #     # 假设你有一个将HTML表格转换为Markdown的函数
-        #     table_md = self.html_table_to_markdown(html_str)
-        #     page_content += f"\n{table_md}\n"
-        #
-        # return page_content
-
-    def _recognize_with_traditional(self, table_image):
         """使用传统方法识别表格结构"""
         import cv2
         import numpy as np
@@ -242,6 +457,7 @@ class TableProcessor:
         cols = [0] + cols + [table_image.shape[1]]
 
         return {"rows": rows, "columns": cols}
+
 
     def convert_to_markdown(self, table_data):
         """将表格数据转换为Markdown格式"""
@@ -677,10 +893,9 @@ class KnowledgeBase:
                         print('---------------------------------')
                         # 表格
                         # 提取表格内容
-                        table_data = self.table_processor.extract_table_content(
+                        table_md = self.table_processor.extract_table_content(
                             img_np, element["bbox"]
                         )
-                        table_md = self.table_processor.convert_to_markdown(table_data)
                         print('table_md', table_md)
 
                         # 添加表格
@@ -766,12 +981,10 @@ class KnowledgeBase:
         result = results[0]
 
         text_blocks = []
-        print(result)
-        print(type(result))
         for line in result['rec_texts']:
             # 提取文本并进行 OCR 错误校正
             corrected_text = self._correct_ocr_errors(line)
-            print('corrected_text', corrected_text)
+            # print('corrected_text', corrected_text)
             # 计算文本块的中心y坐标
             # 获取文本框坐标
             points = result['rec_polys'][result['rec_texts'].index(line)]
